@@ -31,6 +31,35 @@ dp      = Dispatcher(storage=storage)
 db      = Database(DB_PATH)
 user_states: dict[int, dict] = {}
 
+@dp.message(commands=["debug_add"])
+async def cmd_debug_add(message: types.Message):
+    """
+    Покажемо:
+    1) Який зараз user_state для цього користувача
+    2) Скільки слів в БД мають статус "new"
+    """
+    uid = message.from_user.id
+    # Стан після on_message
+    state = user_states.get(uid)
+    await message.answer(f"DEBUG: user_states[{uid}] = {state!r}")
+
+    # Кількість нових слів у БД
+    new_words = db.get_words_by_status("new")
+    await message.answer(f"DEBUG: в БД words зі статусом NEW = {len(new_words)}")
+
+@dp.message(commands=["debug_list"])
+async def cmd_debug_list(message: types.Message):
+    """
+    Виводимо самі слова зі статусом "new": їхні id та текст.
+    Якщо їх нема — повідомимо про це.
+    """
+    new_words = db.get_words_by_status("new")
+    if not new_words:
+        await message.answer("DEBUG: нових слів у БД немає.")
+    else:
+        lines = [f"{wid}: {word}" for wid, word, tr, ts in new_words]
+        await message.answer("DEBUG: нові слова:\n" + "\n".join(lines))
+
 # 3) Клавіатури (keyword-only)
 def main_menu_kb() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
