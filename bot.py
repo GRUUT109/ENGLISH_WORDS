@@ -1,193 +1,165 @@
 import asyncio
 import os
 import re
-from aiohttp import web
-from dotenv import load_dotenv
-from deep_translator import GoogleTranslator
-import eng_to_ipa as ipa
-
+import sqlite3
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
+from aiohttp import web
+from dotenv import load_dotenv
+from translator import translate_word, get_transcription
 
-from database import create_db, get_words_by_category, update_word_category, add_word
-
-# Завантаження змінних середовища
+# Завантаження змінних
 load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+# Ініціалізація бота
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-# Пам'ять для користувача
-user_data = {}
+# База даних
+conn = sqlite3.connect('words.db')
+cursor = conn.cursor()
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    word TEXT UNIQUE,
+    translation TEXT,
+    transcription TEXT,
+    category TEXT
+)
+''')
+conn.commit()
 
-# --- Стани ---
-class Form(StatesGroup):
-    waiting_for_text = State()
-
-# --- Клавіатури ---
+# Клавіатури
 def main_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-            [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-            [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
+        [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
+        [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
+    ])
 
 def word_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
-                InlineKeyboardButton(text="🤔 Знаю", callback_data="knew"),
-                InlineKeyboardButton(text="➡️ Наступне", callback_data="next")
-            ],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
+            InlineKeyboardButton(text="🤔 Знаю", callback_data="knew"),
+            InlineKeyboardButton(text="➡️ Наступне", callback_data="next")
+        ],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+    ])
 
-# --- Старт ---
+# Стани
+user_sessions = {}
+
+# Команди
 @dp.message(CommandStart())
-async def start_handler(message: Message):
-    create_db()
-    user_data[message.from_user.id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
-    await message.answer("👋 Вітаю! Оберіть дію:", reply_markup=main_menu())
+async def start(message: Message):
+    await message.answer("Оберіть опцію:", reply_markup=main_menu())
 
-# --- Обробка кнопок меню ---
 @dp.callback_query(lambda c: c.data in ["send_text", "learn_words", "repeat_words"])
-async def handle_menu(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
+async def handle_menu(callback: CallbackQuery):
+    await callback.answer()
+    chat_id = callback.message.chat.id
 
     if callback.data == "send_text":
-        await callback.message.answer("✏️ Надішліть англійський текст для додавання нових слів:")
-        await state.set_state(Form.waiting_for_text)
+        user_sessions[chat_id] = {"state": "waiting_text"}
+        await bot.send_message(chat_id, "Надішліть текст англійською:")
     else:
         mode = "new" if callback.data == "learn_words" else "learned"
-        db_words = get_words_by_category(mode)
-        words = [{"id": w[0], "word": w[1], "transcription": w[2], "translation": w[3]} for w in db_words]
+        cursor.execute("SELECT * FROM words WHERE category=?", (mode,))
+        words = cursor.fetchall()
 
         if not words:
-            await callback.message.answer("❌ Немає слів для цієї дії.", reply_markup=main_menu())
-            await callback.answer()
+            await bot.send_message(chat_id, "❌ Немає слів для цієї дії.", reply_markup=main_menu())
             return
 
-        user_data[user_id] = {"words": words, "index": 0, "learned": 0, "skipped": 0, "mode": mode}
-        await send_next_word(callback.message, user_id)
+        user_sessions[chat_id] = {
+            "state": "learning",
+            "words": words,
+            "index": 0,
+            "mode": mode,
+            "learned": 0,
+            "skipped": 0
+        }
+        await send_word(chat_id)
 
-    await callback.answer()
+@dp.message()
+async def handle_text(message: Message):
+    chat_id = message.chat.id
 
-# --- Обробка тексту ---
-@dp.message(Form.waiting_for_text)
-async def handle_sent_text(message: Message, state: FSMContext):
-    text = message.text.lower()
-
-    # Витягуємо унікальні англійські слова
-    words_in_text = set(re.findall(r'\b[a-zA-Z]{2,}\b', text))
-
-    if not words_in_text:
-        await message.answer("⚠️ Не знайдено слів для додавання.", reply_markup=main_menu())
-        await state.clear()
+    if user_sessions.get(chat_id, {}).get("state") != "waiting_text":
         return
 
-    # Перевіряємо існуючі слова
-    existing_words = set()
-    for category in ["new", "learned", "knew"]:
-        rows = get_words_by_category(category)
-        existing_words.update([row[1].lower() for row in rows])
+    text = message.text.lower()
+    words = set(re.findall(r'\b[a-zA-Z]{2,}\b', text))
 
-    # Нові слова
-    new_words = words_in_text - existing_words
+    cursor.execute("SELECT word FROM words")
+    existing = {row[0] for row in cursor.fetchall()}
+    new_words = words - existing
 
     added = 0
-    skipped = len(words_in_text) - len(new_words)
-
     for word in sorted(new_words):
-        try:
-            translation = GoogleTranslator(source='en', target='uk').translate(word)
-        except Exception:
-            translation = "-"
-        try:
-            transcription = ipa.convert(word)
-            transcription = transcription if transcription else "-"
-        except Exception:
-            transcription = "-"
-
-        add_word(word, transcription, translation, category="new")
+        translation = translate_word(word)
+        transcription = get_transcription(word)
+        cursor.execute("INSERT INTO words (word, translation, transcription, category) VALUES (?, ?, ?, ?)",
+                       (word, translation, transcription, "new"))
         added += 1
+    conn.commit()
 
-    # Відповідь користувачу
-    result = f"✅ Додано {added} нових слів."
-    if skipped:
-        result += f"\n⚠️ Пропущено {skipped} слів (вже існують у базі)."
+    await message.answer(f"✅ Додано {added} нових слів", reply_markup=main_menu())
+    user_sessions.pop(chat_id, None)
 
-    await message.answer(result, reply_markup=main_menu())
-    await state.clear()
-
-# --- Показ наступного слова ---
-async def send_next_word(message: Message, user_id):
-    data = user_data.get(user_id)
-    words = data["words"]
-    index = data["index"]
+async def send_word(chat_id):
+    session = user_sessions.get(chat_id)
+    words = session.get("words", [])
+    index = session.get("index", 0)
 
     if index >= len(words):
-        await message.answer(
-            f"✅ Ви пройшли всі слова!\n\n📈 Вивчено: {data['learned']}\n🤔 Пропущено: {data['skipped']}",
-            reply_markup=main_menu()
-        )
-        user_data[user_id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
+        await bot.send_message(chat_id, f"✅ Ви пройшли всі слова!\n\n📈 Вивчено: {session['learned']}\n🤔 Пропущено: {session['skipped']}", reply_markup=main_menu())
+        user_sessions.pop(chat_id, None)
         return
 
     word = words[index]
     total = len(words)
 
-    await message.answer(
-        f"<b>({index + 1} з {total})</b>\n\n"
-        f"📝 <b>{word['word']}</b>\n"
-        f"🔊 Транскрипція: {word['transcription'] or '-' }\n"
-        f"🇺🇸 Переклад: {word['translation'] or '-' }",
+    await bot.send_message(chat_id,
+        f"<b>({index + 1} з {total})</b>\n\n<b>{word[1]}</b>\nТранскрипція: {word[3]}\nПереклад: {word[2]}",
         reply_markup=word_keyboard()
     )
 
-# --- Обробка кнопок ---
 @dp.callback_query(lambda c: c.data in ["learned", "knew", "next", "back"])
-async def handle_word_actions(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    data = user_data.get(user_id)
+async def handle_learning(callback: CallbackQuery):
+    await callback.answer()
+    chat_id = callback.message.chat.id
+    session = user_sessions.get(chat_id)
 
-    if not data or not data["words"]:
-        await callback.message.answer("⚠️ Немає активного списку слів.", reply_markup=main_menu())
+    if not session or session.get("state") != "learning":
         return
 
     if callback.data == "back":
-        await callback.message.answer(
-            f"⬅️ Повертаємось у меню.\n\n📈 Вивчено: {data['learned']}\n🤔 Пропущено: {data['skipped']}",
-            reply_markup=main_menu()
-        )
-        user_data[user_id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
-        await callback.answer()
+        await bot.send_message(chat_id, "⬅️ Повертаємось у меню.", reply_markup=main_menu())
+        user_sessions.pop(chat_id, None)
         return
 
-    word = data["words"][data["index"]]
+    index = session["index"]
+    words = session["words"]
+    word_id = words[index][0]
 
     if callback.data == "learned":
-        update_word_category(word["id"], "learned")
-        data["learned"] += 1
+        cursor.execute("UPDATE words SET category='learned' WHERE id=?", (word_id,))
+        session["learned"] += 1
     elif callback.data == "knew":
-        update_word_category(word["id"], "knew")
-        data["skipped"] += 1
+        cursor.execute("UPDATE words SET category='knew' WHERE id=?", (word_id,))
+        session["skipped"] += 1
+    conn.commit()
 
-    data["index"] += 1
-    await send_next_word(callback.message, user_id)
-    await callback.answer()
+    session["index"] += 1
+    await send_word(chat_id)
 
-# --- Webhook ---
+# Webhook
 async def handle_webhook(request):
     update = await request.json()
     await dp.feed_update(bot, update)
@@ -198,11 +170,12 @@ async def on_startup(app):
 
 async def on_shutdown(app):
     await bot.delete_webhook()
+    await bot.session.close()
 
 app = web.Application()
-app.router.add_post("/webhook", handle_webhook)
+app.router.add_post('/webhook', handle_webhook)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
-    web.run_app(app, port=int(os.getenv('PORT', 8080)))
+    web.run_app(app, port=int(os.getenv("PORT", 8080)))

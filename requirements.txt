@@ -1,5 +1,4 @@
-aiogram==3.2.0
+aiogram==3.3.0
 aiohttp
 python-dotenv
-deep-translator
-eng_to_ipa
+requests
