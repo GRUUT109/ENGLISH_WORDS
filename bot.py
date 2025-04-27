@@ -1,47 +1,54 @@
 import asyncio
 import os
 from aiohttp import web
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import CommandStart
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from database import Database
 from translator import translate_word, get_transcription
 
+# Завантаження змінних
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 db = Database()
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
 user_states = {}
 
+# --- Клавіатури ---
 def main_menu_keyboard():
     keyboard = [
-        [types.InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-        [types.InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-        [types.InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
+        [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
+        [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
+        [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
     ]
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def word_keyboard():
     keyboard = [
         [
-            types.InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
-            types.InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
-            types.InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
+            InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
+            InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
+            InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
         ],
-        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
     ]
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-@dp.message(CommandStart())
+# --- Обробник /start ---
+@router.message(CommandStart())
 async def start_handler(message: types.Message):
     await message.answer("Оберіть опцію:", reply_markup=main_menu_keyboard())
 
-@dp.callback_query()
+# --- Обробка Callback кнопок ---
+@router.callback_query()
 async def callback_handler(callback: types.CallbackQuery):
     action = callback.data
     user_id = callback.from_user.id
@@ -100,7 +107,8 @@ async def callback_handler(callback: types.CallbackQuery):
 
     await callback.answer()
 
-@dp.message()
+# --- Обробка тексту ---
+@router.message()
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_states or user_states[user_id]["mode"] != "waiting_text":
@@ -116,12 +124,12 @@ async def handle_text(message: types.Message):
             translation = translate_word(word)
             transcription = get_transcription(word)
             db.add_word(word, translation, transcription)
-
             added_count += 1
 
     await message.answer(f"✅ Додано {added_count} нових слів.", reply_markup=main_menu_keyboard())
     user_states.pop(user_id, None)
 
+# --- Відправка наступного слова ---
 async def send_next_word(message: types.Message, user_id: int):
     state = user_states[user_id]
     words = state["words"]
@@ -133,6 +141,7 @@ async def send_next_word(message: types.Message, user_id: int):
     text = f"<b>{index+1}/{total}</b>\n\n<b>{word}</b>\n[{transcription}]\nПереклад: {translation}"
     await message.answer(text, reply_markup=word_keyboard())
 
+# --- Webhook ---
 async def handle_webhook(request):
     data = await request.json()
     update = types.Update(**data)
