@@ -160,7 +160,7 @@ async def _on_shutdown(app: web.Application):
 if __name__ == "__main__":
     # Створюємо aiohttp-додаток
     app = web.Application()
-    handler = SimpleRequestHandler(dp, handle_in_background=True)
+    handler = SimpleRequestHandler(dp, bot=bot, handle_in_background=True)
     handler.register(app, path=WEBHOOK_PATH)
 
     app.on_startup.append(_on_startup)
