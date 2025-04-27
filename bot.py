@@ -6,6 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
+from database import create_db, get_words_by_category, update_word_category
 
 # Завантаження змінних середовища
 load_dotenv()
@@ -23,9 +24,8 @@ user_data = {}
 def main_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-            [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-            [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
+            [InlineKeyboardButton(text="1. Learn New Words", callback_data="learn_words")],
+            [InlineKeyboardButton(text="2. Repeat Words", callback_data="repeat_words")]
         ]
     )
 
@@ -41,29 +41,32 @@ def word_keyboard():
         ]
     )
 
-# --- Команда /start ---
+# --- Старт бота ---
 @dp.message(CommandStart())
 async def start_handler(message: Message):
+    create_db()
     user_data[message.from_user.id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
-    await message.answer("👋 Вітаю! Оберіть дію:", reply_markup=main_menu())
+    await message.answer("👋 Вітаю! Оберіть опцію:", reply_markup=main_menu())
 
-# --- Вибір режиму Learn або Repeat ---
+# --- Вибір режиму ---
 @dp.callback_query(lambda c: c.data in ["learn_words", "repeat_words"])
 async def choose_mode(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     if callback.data == "learn_words":
-        # тут потрібно підключити реальну базу нових слів
-        words = [{"word": "apple", "transcription": "ˈæp.əl", "translation": "яблуко"},
-                 {"word": "table", "transcription": "ˈteɪ.bəl", "translation": "стіл"}]
-        user_data[user_id] = {"words": words, "index": 0, "learned": 0, "skipped": 0, "mode": "learn"}
+        db_words = get_words_by_category("new")
+        user_data[user_id] = {
+            "words": [{"id": w[0], "word": w[1], "transcription": w[2], "translation": w[3]} for w in db_words],
+            "index": 0, "learned": 0, "skipped": 0, "mode": "learn"
+        }
     else:
-        # тут потрібно підключити реальну базу вивчених слів
-        words = [{"word": "house", "transcription": "haʊs", "translation": "будинок"},
-                 {"word": "car", "transcription": "kɑr", "translation": "автомобіль"}]
-        user_data[user_id] = {"words": words, "index": 0, "learned": 0, "skipped": 0, "mode": "repeat"}
+        db_words = get_words_by_category("learned")
+        user_data[user_id] = {
+            "words": [{"id": w[0], "word": w[1], "transcription": w[2], "translation": w[3]} for w in db_words],
+            "index": 0, "learned": 0, "skipped": 0, "mode": "repeat"
+        }
 
-    if not words:
+    if not user_data[user_id]["words"]:
         await callback.message.answer("❌ Немає слів для цієї дії.", reply_markup=main_menu())
         return
 
@@ -89,12 +92,12 @@ async def send_next_word(message: Message, user_id):
     await message.answer(
         f"<b>({index + 1} з {total})</b>\n\n"
         f"📝 <b>{word['word']}</b>\n"
-        f"🔊 Транскрипція: {word['transcription']}\n"
-        f"🇺🇸 Переклад: {word['translation']}",
+        f"🔊 Транскрипція: {word['transcription'] or '-' }\n"
+        f"🇺🇸 Переклад: {word['translation'] or '-' }",
         reply_markup=word_keyboard()
     )
 
-# --- Обробка кнопок дій ---
+# --- Обробка натискань на кнопки ---
 @dp.callback_query(lambda c: c.data in ["learned", "knew", "next", "back"])
 async def handle_word_actions(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -113,9 +116,13 @@ async def handle_word_actions(callback: CallbackQuery):
         await callback.answer()
         return
 
+    word = data["words"][data["index"]]
+
     if callback.data == "learned":
+        update_word_category(word["id"], "learned")
         data["learned"] += 1
     elif callback.data == "knew":
+        update_word_category(word["id"], "knew")
         data["skipped"] += 1
 
     data["index"] += 1
