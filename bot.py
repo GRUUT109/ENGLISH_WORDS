@@ -11,12 +11,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from database import Database
 import translator
 
-# 1) Завантажуємо змінні з config.env (локально) або з оточення (Railway)
+# 1) Завантажити налаштування
 load_dotenv("config.env")
-
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 DB_PATH      = os.getenv("DB_PATH", "./words.db")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")                     # https://<your-app>.up.railway.app
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # тільки домен, без шляху
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL  = os.getenv("WEBHOOK_URL", f"{WEBHOOK_HOST}{WEBHOOK_PATH}")
 PORT         = int(os.getenv("PORT", "8443"))
@@ -24,33 +23,30 @@ PORT         = int(os.getenv("PORT", "8443"))
 if not BOT_TOKEN or not WEBHOOK_HOST:
     raise RuntimeError("У config.env мають бути BOT_TOKEN і WEBHOOK_HOST")
 
-# 2) Ініціалізація бота, диспетчера, БД і станів
+# 2) Ініціалізація бота, диспетчера з пам’яттю, БД і станів
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
+bot     = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp  = Dispatcher(storage=storage)
-db  = Database(DB_PATH)
-
-
-# Структура для збереження стану кожного користувача
+dp      = Dispatcher(storage=storage)
+db      = Database(DB_PATH)
 user_states: dict[int, dict] = {}
 
-# 3) Клавіатури
+# 3) Клавіатури (keyword-only)
 def main_menu_kb() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton("Надіслати текст",     callback_data="send_text")],
-        [types.InlineKeyboardButton("Learn new words",     callback_data="learn")],
-        [types.InlineKeyboardButton("Repeat learned words",callback_data="repeat")],
+        [types.InlineKeyboardButton(text="Надіслати текст",      callback_data="send_text")],
+        [types.InlineKeyboardButton(text="Learn new words",      callback_data="learn")],
+        [types.InlineKeyboardButton(text="Repeat learned words", callback_data="repeat")],
     ])
 
 def word_cycle_kb() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [
-            types.InlineKeyboardButton("Знаю",   callback_data="know"),
-            types.InlineKeyboardButton("Вивчив", callback_data="learned"),
-            types.InlineKeyboardButton("Next",   callback_data="next"),
+            types.InlineKeyboardButton(text="Знаю",   callback_data="know"),
+            types.InlineKeyboardButton(text="Вивчив", callback_data="learned"),
+            types.InlineKeyboardButton(text="Next",   callback_data="next"),
         ],
-        [types.InlineKeyboardButton("Назад у меню", callback_data="back")],
+        [types.InlineKeyboardButton(text="Назад у меню", callback_data="back")],
     ])
 
 # 4) /start
@@ -58,7 +54,7 @@ def word_cycle_kb() -> types.InlineKeyboardMarkup:
 async def on_start(message: types.Message):
     await message.answer("Оберіть дію:", reply_markup=main_menu_kb())
 
-# 5) Обробка кнопок
+# 5) Callback-кнопки
 @dp.callback_query()
 async def on_callback(callback: types.CallbackQuery):
     await callback.answer()
@@ -66,13 +62,11 @@ async def on_callback(callback: types.CallbackQuery):
     action = callback.data
     state  = user_states.get(uid, {})
 
-    # — Надіслати текст —
     if action == "send_text":
         user_states[uid] = {"mode": "waiting_text"}
         await callback.message.answer("Надішліть текст англійською:")
         return
 
-    # — Learn new words —
     if action == "learn":
         recs = db.get_words_by_status("new")
         if not recs:
@@ -83,7 +77,6 @@ async def on_callback(callback: types.CallbackQuery):
         await callback.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
         return
 
-    # — Repeat learned words —
     if action == "repeat":
         recs = db.get_words_by_status("learned")
         if not recs:
@@ -94,13 +87,11 @@ async def on_callback(callback: types.CallbackQuery):
         await callback.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
         return
 
-    # — Назад у меню —
     if action == "back":
         user_states.pop(uid, None)
         await callback.message.answer("Повернулися в меню.", reply_markup=main_menu_kb())
         return
 
-    # — Next в циклі —
     if action == "next" and state.get("mode") in ("learn", "repeat"):
         idx   = state["index"] + 1
         words = state["words"]
@@ -113,7 +104,6 @@ async def on_callback(callback: types.CallbackQuery):
             user_states.pop(uid, None)
         return
 
-    # — Знаю / Вивчив —
     if action in ("know", "learned") and state.get("mode") in ("learn", "repeat"):
         idx   = state["index"]
         words = state["words"]
@@ -129,7 +119,7 @@ async def on_callback(callback: types.CallbackQuery):
             user_states.pop(uid, None)
         return
 
-# 6) Обробка текстових повідомлень
+# 6) Обробка тексту після “Надіслати текст”
 @dp.message()
 async def on_message(message: types.Message):
     uid   = message.from_user.id
@@ -161,7 +151,6 @@ async def _on_shutdown(app: web.Application):
     await bot.delete_webhook()
 
 if __name__ == "__main__":
-    # Створюємо aiohttp-додаток
     app = web.Application()
     handler = SimpleRequestHandler(dp, bot=bot, handle_in_background=True)
     handler.register(app, path=WEBHOOK_PATH)
