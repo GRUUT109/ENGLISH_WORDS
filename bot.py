@@ -1,141 +1,136 @@
 import asyncio
 import os
-import re
-from aiogram import Bot, Dispatcher, F
+from aiohttp import web
+from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Update
 from dotenv import load_dotenv
 from database import Database
 from translator import translate_word, get_transcription
-from aiohttp import web
 
 load_dotenv()
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_PATH = "/webhook"
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
 db = Database()
 
-# --- Стани ---
-class Form(StatesGroup):
-    waiting_for_text = State()
-    learning = State()
-    repeating = State()
+user_states = {}
 
-# --- Клавіатури ---
 def main_menu():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-            [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-            [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
-        ]
-    )
+    keyboard = [
+        [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
+        [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
+        [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def word_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
-                InlineKeyboardButton(text="🤔 Знаю", callback_data="knew"),
-                InlineKeyboardButton(text="➡️ Наступне", callback_data="next")
-            ],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
-        ]
-    )
+def learning_menu():
+    keyboard = [
+        [
+            InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
+            InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
+            InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
+        ],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_menu")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# --- Команди ---
 @dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
+async def start_handler(message: Message):
     await message.answer("Оберіть опцію:", reply_markup=main_menu())
 
-@dp.callback_query(F.data.in_({"send_text", "learn_words", "repeat_words"}))
-async def handle_menu(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if callback.data == "send_text":
-        await callback.message.answer("Надішліть текст англійською:")
-        await state.set_state(Form.waiting_for_text)
-    else:
-        category = "new" if callback.data == "learn_words" else "learned"
-        words = db.get_words_by_category(category)
+@dp.callback_query()
+async def menu_handler(callback_query):
+    action = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if action == "send_text":
+        user_states[user_id] = {"mode": "waiting_text"}
+        await callback_query.message.answer("Надішліть текст англійською:")
+
+    elif action == "learn_words":
+        words = db.get_words_by_status('new')
         if not words:
-            await callback.message.answer("❌ Немає слів для цієї дії.", reply_markup=main_menu())
-            await state.clear()
+            await callback_query.message.answer("Немає нових слів для вивчення.")
             return
-        await state.update_data(words=words, index=0, mode=category)
-        await state.set_state(Form.learning if category == "new" else Form.repeating)
-        await send_word(callback.message, state)
+        user_states[user_id] = {"mode": "learn", "words": words, "index": 0}
+        await send_word(callback_query.message, user_id)
 
-@dp.message(Form.waiting_for_text)
-async def handle_text(message: Message, state: FSMContext):
-    text = message.text.lower()
-    words = set(re.findall(r'\b[a-zA-Z]{2,}\b', text))
-    added = 0
+    elif action == "repeat_words":
+        words = db.get_words_by_status('learned')
+        if not words:
+            await callback_query.message.answer("Немає слів для повторення.")
+            return
+        user_states[user_id] = {"mode": "repeat", "words": words, "index": 0}
+        await send_word(callback_query.message, user_id)
 
+    elif action in ("learned", "know", "next_word"):
+        if user_id not in user_states:
+            await callback_query.message.answer("Будь ласка, оберіть опцію спочатку.")
+            return
+
+        state = user_states[user_id]
+        words = state["words"]
+        index = state["index"]
+
+        if action == "learned":
+            db.update_status(words[index][0], 'learned')
+        elif action == "know":
+            db.update_status(words[index][0], 'learned')
+
+        state["index"] += 1
+
+        if state["index"] >= len(words):
+            await callback_query.message.answer("Слова закінчились ✅", reply_markup=main_menu())
+            user_states.pop(user_id)
+        else:
+            await send_word(callback_query.message, user_id)
+
+    elif action == "back_to_menu":
+        user_states.pop(user_id, None)
+        await callback_query.message.answer("Оберіть опцію:", reply_markup=main_menu())
+
+@dp.message()
+async def handle_text(message: Message):
+    user_id = message.from_user.id
+    if user_id not in user_states or user_states[user_id]["mode"] != "waiting_text":
+        await message.answer("Будь ласка, оберіть опцію через меню.")
+        return
+
+    text = message.text
+    words = set(word.lower() for word in text.split())
+
+    added_count = 0
     for word in words:
         if not db.word_exists(word):
             translation = translate_word(word)
             transcription = get_transcription(word)
-            db.add_word(word, translation, "new", transcription)
-            added += 1
+            db.add_word(word, translation, transcription)
+            added_count += 1
 
-    await message.answer(f"✅ Додано {added} нових слів", reply_markup=main_menu())
-    await state.clear()
+    await message.answer(f"Додано {added_count} нових слів ✅", reply_markup=main_menu())
+    user_states.pop(user_id)
 
-async def send_word(message, state: FSMContext):
-    data = await state.get_data()
-    words = data.get("words", [])
-    index = data.get("index", 0)
+async def send_word(message, user_id):
+    state = user_states[user_id]
+    words = state["words"]
+    index = state["index"]
 
-    if index >= len(words):
-        await message.answer("✅ Ви пройшли всі слова.", reply_markup=main_menu())
-        await state.clear()
-        return
+    word_id, word, translation, transcription = words[index]
+    total = len(words)
+    text = f"<b>{index+1}/{total}</b>\n\n{word}\n{transcription}\nПереклад: {translation}"
+    await message.answer(text, reply_markup=learning_menu())
 
-    word = words[index]
-    await message.answer(
-        f"<b>({index + 1} з {len(words)})</b>\n\n<b>{word['word']}</b>\nТранскрипція: {word['transcription']}\nПереклад: {word['translation']}",
-        reply_markup=word_keyboard()
-    )
-
-@dp.callback_query(F.data.in_({"learned", "knew", "next", "back"}))
-async def handle_learning(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    words = data.get("words", [])
-    index = data.get("index", 0)
-    mode = data.get("mode", "new")
-
-    if callback.data == "back":
-        await callback.message.answer("⬅️ Повертаємось у меню.", reply_markup=main_menu())
-        await state.clear()
-        return
-
-    if index >= len(words):
-        await send_word(callback.message, state)
-        return
-
-    word_id = words[index]["id"]
-
-    if callback.data == "learned":
-        db.update_word_category(word_id, "learned")
-    elif callback.data == "knew":
-        db.update_word_category(word_id, "knew")
-
-    await state.update_data(index=index + 1)
-    await send_word(callback.message, state)
-
-# --- WEBHOOK ---
 async def handle_webhook(request):
     data = await request.json()
-    await dp.feed_update(bot, data)
+    update = Update(**data)
+    await dp.feed_update(bot, update)
     return web.Response()
 
 async def on_startup(app):
@@ -145,9 +140,9 @@ async def on_shutdown(app):
     await bot.delete_webhook()
 
 app = web.Application()
-app.router.add_post("/", handle_webhook)
+app.router.add_post(WEBHOOK_PATH, handle_webhook)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
-    web.run_app(app, port=int(os.getenv('PORT', 8080)))
+    web.run_app(app, port=int(os.getenv("PORT", 8080)))
