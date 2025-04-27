@@ -1,164 +1,177 @@
-import asyncio
 import os
-from aiohttp import web
-from aiogram import Bot, Dispatcher, Router, types
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import re
+import logging
 from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import CommandStart
+from aiogram.utils.executor import start_webhook
+
 from database import Database
-from translator import translate_word, get_transcription
+import translator
 
-# Завантаження змінних
-load_dotenv()
+# ----------------------------
+# 1) Завантаження налаштувань
+# ----------------------------
+# локально читаємо config.env; у Railway ці змінні будуть у середовищі
+load_dotenv("config.env")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+BOT_TOKEN    = os.getenv("BOT_TOKEN")
+DB_PATH      = os.getenv("DB_PATH", "./words.db")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")      # https://<your-app>.up.railway.app
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
+WEBHOOK_URL  = os.getenv("WEBHOOK_URL", f"{WEBHOOK_HOST}{WEBHOOK_PATH}")
+PORT         = int(os.getenv("PORT", "8443"))
+
+if not BOT_TOKEN or not WEBHOOK_HOST:
+    raise RuntimeError("Потрібно задати BOT_TOKEN і WEBHOOK_HOST у config.env або середовищі")
 
 bot = Bot(token=BOT_TOKEN)
-db = Database()
-dp = Dispatcher()
-router = Router()
-dp.include_router(router)
+dp  = Dispatcher(bot)
+db  = Database(DB_PATH)
 
-user_states = {}
+# Стан користувачів: режим ("waiting_text", "learn", "repeat"), список слів, індекс
+user_states: dict[int, dict] = {}
 
-# --- Клавіатури ---
-def main_menu_keyboard():
-    keyboard = [
-        [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-        [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-        [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+# ----------------------------
+# 2) Клавіатури
+# ----------------------------
+def main_menu_kb() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton("Надіслати текст",    callback_data="send_text")],
+        [types.InlineKeyboardButton("Learn new words",    callback_data="learn")],
+        [types.InlineKeyboardButton("Repeat learned words", callback_data="repeat")],
+    ])
 
-def word_keyboard():
-    keyboard = [
+def word_cycle_kb() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
-            InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
-            InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
+            types.InlineKeyboardButton("Знаю",     callback_data="know"),
+            types.InlineKeyboardButton("Вивчив",   callback_data="learned"),
+            types.InlineKeyboardButton("Next",     callback_data="next"),
         ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+        [types.InlineKeyboardButton("Назад у меню", callback_data="back")],
+    ])
 
-# --- Обробник /start ---
-@router.message(CommandStart())
-async def start_handler(message: types.Message):
-    await message.answer("Оберіть опцію:", reply_markup=main_menu_keyboard())
+# ----------------------------
+# 3) Обробники
+# ----------------------------
+@dp.message(CommandStart())
+async def on_start(m: types.Message):
+    await m.answer("Оберіть дію:", reply_markup=main_menu_kb())
 
-# --- Обробка Callback кнопок ---
-@router.callback_query()
-async def callback_handler(callback: types.CallbackQuery):
-    action = callback.data
-    user_id = callback.from_user.id
+@dp.callback_query()
+async def on_callback(c: types.CallbackQuery):
+    await c.answer()  # підтвердження натискання кнопки
+    uid = c.from_user.id
+    action = c.data
+    state = user_states.get(uid, {})
 
+    # ---- Надіслати текст ----
     if action == "send_text":
-        user_states[user_id] = {"mode": "waiting_text"}
-        await callback.message.answer("Надішліть текст англійською:")
-
-    elif action == "learn_words":
-        words = db.get_words_by_status('new')
-        if not words:
-            await callback.message.answer("❌ Немає нових слів для вивчення.", reply_markup=main_menu_keyboard())
-            return
-        user_states[user_id] = {"mode": "learn", "words": words, "index": 0}
-        await send_next_word(callback.message, user_id)
-
-    elif action == "repeat_words":
-        words = db.get_words_by_status('know')
-        if not words:
-            await callback.message.answer("❌ Немає слів для повторення.", reply_markup=main_menu_keyboard())
-            return
-        user_states[user_id] = {"mode": "repeat", "words": words, "index": 0}
-        await send_next_word(callback.message, user_id)
-
-    elif action in ("learned", "know", "next_word"):
-        if user_id not in user_states:
-            await callback.message.answer("⚠️ Спочатку оберіть опцію з меню.")
-            return
-        state = user_states[user_id]
-        words = state["words"]
-        index = state["index"]
-
-        if index >= len(words):
-            await callback.message.answer("✅ Всі слова пройдено!", reply_markup=main_menu_keyboard())
-            user_states.pop(user_id, None)
-            return
-
-        word_id = words[index][0]
-
-        if action == "learned":
-            db.update_status(word_id, "learned")
-        elif action == "know":
-            db.update_status(word_id, "know")
-
-        state["index"] += 1
-
-        if state["index"] >= len(words):
-            await callback.message.answer("✅ Ви пройшли всі слова!", reply_markup=main_menu_keyboard())
-            user_states.pop(user_id, None)
-        else:
-            await send_next_word(callback.message, user_id)
-
-    elif action == "back_to_menu":
-        user_states.pop(user_id, None)
-        await callback.message.answer("⬅️ Повернення у головне меню.", reply_markup=main_menu_keyboard())
-
-    await callback.answer()
-
-# --- Обробка тексту ---
-@router.message()
-async def handle_text(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in user_states or user_states[user_id]["mode"] != "waiting_text":
-        await message.answer("Будь ласка, скористайтесь кнопкою 'Send Text' у меню.")
+        user_states[uid] = {"mode": "waiting_text"}
+        await c.message.answer("Надішліть, будь ласка, текст англійською:")
         return
 
-    text = message.text.lower()
-    words = set(word.strip('.,!?') for word in text.split() if word.isalpha())
+    # ---- Learn new words ----
+    if action == "learn":
+        recs = db.get_words_by_status("new")
+        if not recs:
+            await c.message.answer("Нових слів немає.", reply_markup=main_menu_kb())
+            return
+        user_states[uid] = {"mode": "learn", "words": recs, "index": 0}
+        _id, w, tr, ts = recs[0]
+        await c.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
+        return
 
-    added_count = 0
-    for word in words:
-        if not db.word_exists(word):
-            translation = translate_word(word)
-            transcription = get_transcription(word)
-            db.add_word(word, translation, transcription)
-            added_count += 1
+    # ---- Repeat learned words ----
+    if action == "repeat":
+        recs = db.get_words_by_status("learned")
+        if not recs:
+            await c.message.answer("Вивчених слів немає.", reply_markup=main_menu_kb())
+            return
+        user_states[uid] = {"mode": "repeat", "words": recs, "index": 0}
+        _id, w, tr, ts = recs[0]
+        await c.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
+        return
 
-    await message.answer(f"✅ Додано {added_count} нових слів.", reply_markup=main_menu_keyboard())
-    user_states.pop(user_id, None)
+    # ---- Назад у меню ----
+    if action == "back":
+        user_states.pop(uid, None)
+        await c.message.answer("Повернулися в меню.", reply_markup=main_menu_kb())
+        return
 
-# --- Відправка наступного слова ---
-async def send_next_word(message: types.Message, user_id: int):
-    state = user_states[user_id]
-    words = state["words"]
-    index = state["index"]
+    # ---- Next у циклі learn/repeat ----
+    if action == "next" and state.get("mode") in ("learn", "repeat"):
+        idx   = state["index"] + 1
+        words = state["words"]
+        if idx < len(words):
+            user_states[uid]["index"] = idx
+            _id, w, tr, ts = words[idx]
+            await c.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
+        else:
+            await c.message.answer("Кінець списку.", reply_markup=main_menu_kb())
+            user_states.pop(uid, None)
+        return
 
-    word_id, word, translation, transcription = words[index]
-    total = len(words)
+    # ---- Знаю / Вивчив ----
+    if action in ("know", "learned") and state.get("mode") in ("learn", "repeat"):
+        idx   = state["index"]
+        words = state["words"]
+        word_id = words[idx][0]
+        # обидві кнопки переводять слово в статус learned
+        db.update_status(word_id, "learned")
+        # йдемо далі
+        idx += 1
+        if idx < len(words):
+            user_states[uid]["index"] = idx
+            _id, w, tr, ts = words[idx]
+            await c.message.answer(f"{w}\n{tr}\n/{ts}/", reply_markup=word_cycle_kb())
+        else:
+            await c.message.answer("Ви завершили цей список.", reply_markup=main_menu_kb())
+            user_states.pop(uid, None)
+        return
 
-    text = f"<b>{index+1}/{total}</b>\n\n<b>{word}</b>\n[{transcription}]\nПереклад: {translation}"
-    await message.answer(text, reply_markup=word_keyboard())
+@dp.message()
+async def on_message(m: types.Message):
+    uid = m.from_user.id
+    state = user_states.get(uid)
+    if not state or state.get("mode") != "waiting_text":
+        return  # ігноруємо інші повідомлення
 
-# --- Webhook ---
-async def handle_webhook(request):
-    data = await request.json()
-    update = types.Update(**data)
-    await dp.feed_update(bot, update)
-    return web.Response()
+    text = m.text or ""
+    # витягуємо лише слова, знижуємо регістр
+    words = re.findall(r"[A-Za-z']+", text)
+    uniq  = set(w.lower() for w in words)
+    added = 0
 
-async def on_startup(app):
+    for w in uniq:
+        if not db.word_exists(w):
+            tr = translator.translate_word(w)
+            ts = translator.get_transcription(w)  # локальна IPA
+            if db.add_word(w, tr, ts):
+                added += 1
+
+    await m.answer(f"Додано нових слів: {added}", reply_markup=main_menu_kb())
+    user_states.pop(uid, None)
+
+# ----------------------------
+# 4) Запуск через Webhook
+# ----------------------------
+async def on_startup(dp):
+    await bot.delete_webhook()
     await bot.set_webhook(WEBHOOK_URL)
 
-async def on_shutdown(app):
+async def on_shutdown(dp):
     await bot.delete_webhook()
-    await bot.session.close()
-
-app = web.Application()
-app.router.add_post("/webhook", handle_webhook)
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
 
 if __name__ == "__main__":
-    web.run_app(app, port=int(os.getenv("PORT", 8080)))
+    logging.basicConfig(level=logging.INFO)
+    start_webhook(
+        dispatcher   = dp,
+        webhook_path = WEBHOOK_PATH,
+        on_startup   = on_startup,
+        on_shutdown  = on_shutdown,
+        skip_updates = True,
+        host         = "0.0.0.0",
+        port         = PORT,
+    )
