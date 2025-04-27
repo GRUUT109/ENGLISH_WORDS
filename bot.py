@@ -4,10 +4,10 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
-# Завантажуємо змінні середовища
+# Завантаження змінних середовища
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,18 +16,16 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
-# Пам'ять для поточного сеансу вивчення
+# Пам'ять для користувача
 user_data = {}
 
-# Кнопки
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
+# --- Клавіатури ---
 def main_menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
             [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-            [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")],
+            [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
         ]
     )
 
@@ -43,35 +41,103 @@ def word_keyboard():
         ]
     )
 
-# Обробник команди /start
+# --- Команда /start ---
 @dp.message(CommandStart())
 async def start_handler(message: Message):
     user_data[message.from_user.id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
-    await message.answer("👋 Вітаю! Оберіть опцію:", reply_markup=main_menu())
+    await message.answer("👋 Вітаю! Оберіть дію:", reply_markup=main_menu())
 
-# --- Тут ти підключиш свої функції для Send Text / Learn / Repeat ---
-# (поки що це базова структура, ти сам напишеш функції завантаження слів)
+# --- Вибір режиму Learn або Repeat ---
+@dp.callback_query(lambda c: c.data in ["learn_words", "repeat_words"])
+async def choose_mode(callback: CallbackQuery):
+    user_id = callback.from_user.id
 
-# Обробник вебхуків від Telegram
+    if callback.data == "learn_words":
+        # тут потрібно підключити реальну базу нових слів
+        words = [{"word": "apple", "transcription": "ˈæp.əl", "translation": "яблуко"},
+                 {"word": "table", "transcription": "ˈteɪ.bəl", "translation": "стіл"}]
+        user_data[user_id] = {"words": words, "index": 0, "learned": 0, "skipped": 0, "mode": "learn"}
+    else:
+        # тут потрібно підключити реальну базу вивчених слів
+        words = [{"word": "house", "transcription": "haʊs", "translation": "будинок"},
+                 {"word": "car", "transcription": "kɑr", "translation": "автомобіль"}]
+        user_data[user_id] = {"words": words, "index": 0, "learned": 0, "skipped": 0, "mode": "repeat"}
+
+    if not words:
+        await callback.message.answer("❌ Немає слів для цієї дії.", reply_markup=main_menu())
+        return
+
+    await send_next_word(callback.message, user_id)
+
+# --- Показ наступного слова ---
+async def send_next_word(message: Message, user_id):
+    data = user_data.get(user_id)
+    words = data["words"]
+    index = data["index"]
+
+    if index >= len(words):
+        await message.answer(
+            f"✅ Ви пройшли всі слова!\n\n📈 Вивчено: {data['learned']}\n🤔 Пропущено: {data['skipped']}",
+            reply_markup=main_menu()
+        )
+        user_data[user_id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
+        return
+
+    word = words[index]
+    total = len(words)
+
+    await message.answer(
+        f"<b>({index + 1} з {total})</b>\n\n"
+        f"📝 <b>{word['word']}</b>\n"
+        f"🔊 Транскрипція: {word['transcription']}\n"
+        f"🇺🇸 Переклад: {word['translation']}",
+        reply_markup=word_keyboard()
+    )
+
+# --- Обробка кнопок дій ---
+@dp.callback_query(lambda c: c.data in ["learned", "knew", "next", "back"])
+async def handle_word_actions(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    data = user_data.get(user_id)
+
+    if not data or not data["words"]:
+        await callback.message.answer("⚠️ Немає активного списку слів.", reply_markup=main_menu())
+        return
+
+    if callback.data == "back":
+        await callback.message.answer(
+            f"⬅️ Повертаємось у меню.\n\n📈 Вивчено: {data['learned']}\n🤔 Пропущено: {data['skipped']}",
+            reply_markup=main_menu()
+        )
+        user_data[user_id] = {"words": [], "index": 0, "learned": 0, "skipped": 0, "mode": None}
+        await callback.answer()
+        return
+
+    if callback.data == "learned":
+        data["learned"] += 1
+    elif callback.data == "knew":
+        data["skipped"] += 1
+
+    data["index"] += 1
+    await send_next_word(callback.message, user_id)
+    await callback.answer()
+
+# --- Webhook ---
 async def handle_webhook(request):
     update = await request.json()
     await dp.feed_update(bot, update)
     return web.Response()
 
-# При старті серверу
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
 
-# При виключенні серверу
 async def on_shutdown(app):
     await bot.delete_webhook()
 
-# Ініціалізація сервера aiohttp
 app = web.Application()
 app.router.add_post("/webhook", handle_webhook)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
-# Запуск
 if __name__ == "__main__":
     web.run_app(app, port=int(os.getenv('PORT', 8080)))
