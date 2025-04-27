@@ -18,7 +18,7 @@ db = Database()
 
 user_states = {}
 
-def main_menu():
+def main_menu_keyboard():
     keyboard = [
         [types.InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
         [types.InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
@@ -26,81 +26,89 @@ def main_menu():
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def learning_menu():
+def word_keyboard():
     keyboard = [
         [
             types.InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
             types.InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
             types.InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
         ],
-        [types.InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_menu")]
+        [types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer("Оберіть опцію:", reply_markup=main_menu())
+    await message.answer("Оберіть опцію:", reply_markup=main_menu_keyboard())
 
 @dp.callback_query()
-async def menu_handler(callback_query):
-    action = callback_query.data
-    user_id = callback_query.from_user.id
+async def callback_handler(callback: types.CallbackQuery):
+    action = callback.data
+    user_id = callback.from_user.id
 
     if action == "send_text":
         user_states[user_id] = {"mode": "waiting_text"}
-        await callback_query.message.answer("Надішліть текст англійською:")
+        await callback.message.answer("Надішліть текст англійською:")
 
     elif action == "learn_words":
         words = db.get_words_by_status('new')
         if not words:
-            await callback_query.message.answer("Немає нових слів для вивчення.")
+            await callback.message.answer("❌ Немає нових слів для вивчення.", reply_markup=main_menu_keyboard())
             return
         user_states[user_id] = {"mode": "learn", "words": words, "index": 0}
-        await send_word(callback_query.message, user_id)
+        await send_next_word(callback.message, user_id)
 
     elif action == "repeat_words":
-        words = db.get_words_by_status('learned')
+        words = db.get_words_by_status('know')
         if not words:
-            await callback_query.message.answer("Немає слів для повторення.")
+            await callback.message.answer("❌ Немає слів для повторення.", reply_markup=main_menu_keyboard())
             return
         user_states[user_id] = {"mode": "repeat", "words": words, "index": 0}
-        await send_word(callback_query.message, user_id)
+        await send_next_word(callback.message, user_id)
 
     elif action in ("learned", "know", "next_word"):
         if user_id not in user_states:
-            await callback_query.message.answer("Будь ласка, оберіть опцію спочатку.")
+            await callback.message.answer("⚠️ Спочатку оберіть опцію з меню.")
             return
-
         state = user_states[user_id]
         words = state["words"]
         index = state["index"]
 
+        if index >= len(words):
+            await callback.message.answer("✅ Всі слова пройдено!", reply_markup=main_menu_keyboard())
+            user_states.pop(user_id, None)
+            return
+
+        word_id = words[index][0]
+
         if action == "learned":
-            db.update_status(words[index][0], 'learned')
+            db.update_status(word_id, "learned")
         elif action == "know":
-            db.update_status(words[index][0], 'known')
+            db.update_status(word_id, "know")
 
         state["index"] += 1
 
         if state["index"] >= len(words):
-            await callback_query.message.answer("Слова закінчились ✅", reply_markup=main_menu())
-            user_states.pop(user_id)
+            await callback.message.answer("✅ Ви пройшли всі слова!", reply_markup=main_menu_keyboard())
+            user_states.pop(user_id, None)
         else:
-            await send_word(callback_query.message, user_id)
+            await send_next_word(callback.message, user_id)
 
     elif action == "back_to_menu":
         user_states.pop(user_id, None)
-        await callback_query.message.answer("Оберіть опцію:", reply_markup=main_menu())
+        await callback.message.answer("⬅️ Повернення у головне меню.", reply_markup=main_menu_keyboard())
+
+    await callback.answer()
 
 @dp.message()
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_states or user_states[user_id]["mode"] != "waiting_text":
-        await message.answer("Будь ласка, оберіть опцію через меню.")
+        await message.answer("Будь ласка, скористайтесь кнопкою 'Send Text' у меню.")
         return
 
-    text = message.text
-    words = set(word.lower() for word in text.split())
+    text = message.text.lower()
+    words = set(word.strip('.,!?') for word in text.split() if word.isalpha())
 
     added_count = 0
     for word in words:
@@ -108,20 +116,22 @@ async def handle_text(message: types.Message):
             translation = translate_word(word)
             transcription = get_transcription(word)
             db.add_word(word, translation, transcription)
+
             added_count += 1
 
-    await message.answer(f"Додано {added_count} нових слів ✅", reply_markup=main_menu())
-    user_states.pop(user_id)
+    await message.answer(f"✅ Додано {added_count} нових слів.", reply_markup=main_menu_keyboard())
+    user_states.pop(user_id, None)
 
-async def send_word(message, user_id):
+async def send_next_word(message: types.Message, user_id: int):
     state = user_states[user_id]
     words = state["words"]
     index = state["index"]
 
     word_id, word, translation, transcription = words[index]
     total = len(words)
-    text = f"<b>{index+1}/{total}</b>\n\n{word}\n{transcription}\nПереклад: {translation}"
-    await message.answer(text, reply_markup=learning_menu())
+
+    text = f"<b>{index+1}/{total}</b>\n\n<b>{word}</b>\n[{transcription}]\nПереклад: {translation}"
+    await message.answer(text, reply_markup=word_keyboard())
 
 async def handle_webhook(request):
     data = await request.json()
