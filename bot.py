@@ -6,6 +6,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from database import Database
 import translator
@@ -26,8 +27,10 @@ if not BOT_TOKEN or not WEBHOOK_HOST:
 # 2) Ініціалізація бота, диспетчера, БД і станів
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp  = Dispatcher()
+storage = MemoryStorage()
+dp  = Dispatcher(storage=storage)
 db  = Database(DB_PATH)
+
 
 # Структура для збереження стану кожного користувача
 user_states: dict[int, dict] = {}
