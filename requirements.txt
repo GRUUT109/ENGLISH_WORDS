@@ -1,4 +1,5 @@
-aiogram==3.3.0
+aiogram
 aiohttp
 python-dotenv
-requests
+googletrans==4.0.0-rc1
+pronouncing
