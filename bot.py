@@ -1,21 +1,23 @@
 import os
 import re
 import logging
+
 from dotenv import load_dotenv
 from aiohttp import web
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from database import Database
 import translator
 
-# 1) Завантажити налаштування
+# 1) Завантажуємо налаштування
 load_dotenv("config.env")
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 DB_PATH      = os.getenv("DB_PATH", "./words.db")
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")  # тільки домен, без шляху
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST")               # тільки домен
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL  = os.getenv("WEBHOOK_URL", f"{WEBHOOK_HOST}{WEBHOOK_PATH}")
 PORT         = int(os.getenv("PORT", "8443"))
@@ -23,44 +25,17 @@ PORT         = int(os.getenv("PORT", "8443"))
 if not BOT_TOKEN or not WEBHOOK_HOST:
     raise RuntimeError("У config.env мають бути BOT_TOKEN і WEBHOOK_HOST")
 
-# 2) Ініціалізація бота, диспетчера з пам’яттю, БД і станів
+# 2) Ініціалізація
 logging.basicConfig(level=logging.INFO)
 bot     = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp      = Dispatcher(storage=storage)
 db      = Database(DB_PATH)
+
+# для відслідковування контексту кожного юзера
 user_states: dict[int, dict] = {}
 
-@dp.message(commands=["debug_add"])
-async def cmd_debug_add(message: types.Message):
-    """
-    Покажемо:
-    1) Який зараз user_state для цього користувача
-    2) Скільки слів в БД мають статус "new"
-    """
-    uid = message.from_user.id
-    # Стан після on_message
-    state = user_states.get(uid)
-    await message.answer(f"DEBUG: user_states[{uid}] = {state!r}")
-
-    # Кількість нових слів у БД
-    new_words = db.get_words_by_status("new")
-    await message.answer(f"DEBUG: в БД words зі статусом NEW = {len(new_words)}")
-
-@dp.message(commands=["debug_list"])
-async def cmd_debug_list(message: types.Message):
-    """
-    Виводимо самі слова зі статусом "new": їхні id та текст.
-    Якщо їх нема — повідомимо про це.
-    """
-    new_words = db.get_words_by_status("new")
-    if not new_words:
-        await message.answer("DEBUG: нових слів у БД немає.")
-    else:
-        lines = [f"{wid}: {word}" for wid, word, tr, ts in new_words]
-        await message.answer("DEBUG: нові слова:\n" + "\n".join(lines))
-
-# 3) Клавіатури (keyword-only)
+# 3) Клавіатури
 def main_menu_kb() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="Надіслати текст",      callback_data="send_text")],
@@ -83,7 +58,7 @@ def word_cycle_kb() -> types.InlineKeyboardMarkup:
 async def on_start(message: types.Message):
     await message.answer("Оберіть дію:", reply_markup=main_menu_kb())
 
-# 5) Callback-кнопки
+# 5) Обробка кнопок
 @dp.callback_query()
 async def on_callback(callback: types.CallbackQuery):
     await callback.answer()
@@ -148,7 +123,7 @@ async def on_callback(callback: types.CallbackQuery):
             user_states.pop(uid, None)
         return
 
-# 6) Обробка тексту після “Надіслати текст”
+# 6) Обробка тексту
 @dp.message()
 async def on_message(message: types.Message):
     uid   = message.from_user.id
@@ -170,6 +145,25 @@ async def on_message(message: types.Message):
 
     await message.answer(f"Додано нових слів: {added}", reply_markup=main_menu_kb())
     user_states.pop(uid, None)
+
+# ——————— Debug-хендлери ———————
+@dp.message(Command("debug_add"))
+async def cmd_debug_add(message: types.Message):
+    uid   = message.from_user.id
+    state = user_states.get(uid)
+    await message.answer(f"DEBUG: user_states[{uid}] = {state!r}")
+
+    new_words = db.get_words_by_status("new")
+    await message.answer(f"DEBUG: в БД words NEW = {len(new_words)}")
+
+@dp.message(Command("debug_list"))
+async def cmd_debug_list(message: types.Message):
+    new_words = db.get_words_by_status("new")
+    if not new_words:
+        await message.answer("DEBUG: нових слів у БД немає.")
+    else:
+        lines = [f"{wid}: {w}" for wid, w, tr, ts in new_words]
+        await message.answer("DEBUG: ось нові слова:\n" + "\n".join(lines))
 
 # 7) Webhook через aiohttp
 async def _on_startup(app: web.Application):
