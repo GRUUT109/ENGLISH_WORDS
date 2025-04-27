@@ -1,11 +1,8 @@
 import asyncio
 import os
 from aiohttp import web
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types import Update
 from dotenv import load_dotenv
 from database import Database
 from translator import translate_word, get_transcription
@@ -14,9 +11,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_PATH = "/webhook"
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database()
 
@@ -24,25 +20,25 @@ user_states = {}
 
 def main_menu():
     keyboard = [
-        [InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
-        [InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
-        [InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
+        [types.InlineKeyboardButton(text="1. Send Text", callback_data="send_text")],
+        [types.InlineKeyboardButton(text="2. Learn New Words", callback_data="learn_words")],
+        [types.InlineKeyboardButton(text="3. Repeat Words", callback_data="repeat_words")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def learning_menu():
     keyboard = [
         [
-            InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
-            InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
-            InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
+            types.InlineKeyboardButton(text="✅ Вивчив", callback_data="learned"),
+            types.InlineKeyboardButton(text="🤔 Знаю", callback_data="know"),
+            types.InlineKeyboardButton(text="➡️ Наступне", callback_data="next_word")
         ],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_menu")]
+        [types.InlineKeyboardButton(text="↩️ Назад", callback_data="back_to_menu")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @dp.message(CommandStart())
-async def start_handler(message: Message):
+async def start_handler(message: types.Message):
     await message.answer("Оберіть опцію:", reply_markup=main_menu())
 
 @dp.callback_query()
@@ -82,7 +78,7 @@ async def menu_handler(callback_query):
         if action == "learned":
             db.update_status(words[index][0], 'learned')
         elif action == "know":
-            db.update_status(words[index][0], 'learned')
+            db.update_status(words[index][0], 'known')
 
         state["index"] += 1
 
@@ -97,7 +93,7 @@ async def menu_handler(callback_query):
         await callback_query.message.answer("Оберіть опцію:", reply_markup=main_menu())
 
 @dp.message()
-async def handle_text(message: Message):
+async def handle_text(message: types.Message):
     user_id = message.from_user.id
     if user_id not in user_states or user_states[user_id]["mode"] != "waiting_text":
         await message.answer("Будь ласка, оберіть опцію через меню.")
@@ -129,7 +125,7 @@ async def send_word(message, user_id):
 
 async def handle_webhook(request):
     data = await request.json()
-    update = Update(**data)
+    update = types.Update(**data)
     await dp.feed_update(bot, update)
     return web.Response()
 
@@ -138,9 +134,10 @@ async def on_startup(app):
 
 async def on_shutdown(app):
     await bot.delete_webhook()
+    await bot.session.close()
 
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, handle_webhook)
+app.router.add_post("/webhook", handle_webhook)
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 

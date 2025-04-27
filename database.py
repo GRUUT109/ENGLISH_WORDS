@@ -36,22 +36,16 @@ class Database:
         )
         return self.cursor.fetchall()
 
-    def update_word_status(self, word_id, new_status):
+    def update_status(self, word_id, new_status):
         self.cursor.execute(
             "UPDATE words SET status = ? WHERE id = ?",
             (new_status, word_id)
         )
         self.conn.commit()
 
-    def reset_progress(self):
+    def word_exists(self, word):
         self.cursor.execute(
-            "UPDATE words SET status = 'new'"
+            "SELECT 1 FROM words WHERE word = ?",
+            (word,)
         )
-        self.conn.commit()
-
-    def delete_all_words(self):
-        self.cursor.execute("DELETE FROM words")
-        self.conn.commit()
-
-    def close(self):
-        self.conn.close()
+        return self.cursor.fetchone() is not None

@@ -1,26 +1,21 @@
 import requests
+import eng_to_ipa as ipa
 
 def translate_word(word):
     try:
-        url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|uk"
+        url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=uk&dt=t&q=" + word
         response = requests.get(url)
-        data = response.json()
-        translation = data['responseData']['translatedText']
-        return translation
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return "невідомо"
+        if response.status_code == 200:
+            result = response.json()
+            return result[0][0][0]
+        else:
+            return "-"
+    except:
+        return "-"
 
 def get_transcription(word):
     try:
-        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
-        response = requests.get(url)
-        data = response.json()
-        phonetics = data[0]['phonetics']
-        if phonetics:
-            transcription = phonetics[0].get('text', '')
-            return transcription if transcription else "-"
-        return "-"
-    except Exception as e:
-        print(f"Transcription error: {e}")
+        transcription = ipa.convert(word)
+        return transcription if transcription else "-"
+    except:
         return "-"
