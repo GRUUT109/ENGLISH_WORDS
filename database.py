@@ -1,47 +1,57 @@
 import sqlite3
 
-DB_PATH = "words.db"
+class Database:
+    def __init__(self, db_path='words.db'):
+        self.conn = sqlite3.connect(db_path)
+        self.cursor = self.conn.cursor()
+        self.create_table()
 
-def create_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS words (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            word TEXT UNIQUE,
-            transcription TEXT,
-            translation TEXT,
-            category TEXT
+    def create_table(self):
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS words (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word TEXT UNIQUE,
+                translation TEXT,
+                transcription TEXT,
+                status TEXT DEFAULT 'new'
+            )
+        ''')
+        self.conn.commit()
+
+    def add_word(self, word, translation, transcription):
+        try:
+            self.cursor.execute(
+                "INSERT INTO words (word, translation, transcription) VALUES (?, ?, ?)",
+                (word, translation, transcription)
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def get_words_by_status(self, status):
+        self.cursor.execute(
+            "SELECT id, word, translation, transcription FROM words WHERE status = ?",
+            (status,)
         )
-    ''')
-    conn.commit()
-    conn.close()
+        return self.cursor.fetchall()
 
-def add_word(word, transcription, translation, category="new"):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR IGNORE INTO words (word, transcription, translation, category)
-        VALUES (?, ?, ?, ?)
-    ''', (word, transcription, translation, category))
-    conn.commit()
-    conn.close()
+    def update_word_status(self, word_id, new_status):
+        self.cursor.execute(
+            "UPDATE words SET status = ? WHERE id = ?",
+            (new_status, word_id)
+        )
+        self.conn.commit()
 
-def get_words_by_category(category):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        SELECT id, word, transcription, translation FROM words WHERE category=?
-    ''', (category,))
-    result = c.fetchall()
-    conn.close()
-    return result
+    def reset_progress(self):
+        self.cursor.execute(
+            "UPDATE words SET status = 'new'"
+        )
+        self.conn.commit()
 
-def update_word_category(word_id, new_category):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        UPDATE words SET category=? WHERE id=?
-    ''', (new_category, word_id))
-    conn.commit()
-    conn.close()
+    def delete_all_words(self):
+        self.cursor.execute("DELETE FROM words")
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
