@@ -26,7 +26,7 @@ if not BOT_TOKEN or not WEBHOOK_HOST:
 # 2) Ініціалізація бота, диспетчера, БД і станів
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp  = Dispatcher(bot)
+dp  = Dispatcher()
 db  = Database(DB_PATH)
 
 # Структура для збереження стану кожного користувача
